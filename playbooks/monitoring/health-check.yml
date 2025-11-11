@@ -1,0 +1,60 @@
+---
+- name: System health check
+  hosts: all
+  gather_facts: yes
+  
+  vars:
+    disk_warning_threshold: 80
+    memory_warning_threshold: 90
+    cpu_warning_threshold: 80
+  
+  tasks:
+    - name: Check disk usage
+      shell: df -h / | tail -1 | awk '{print $5}' | sed 's/%//'
+      register: disk_usage
+      changed_when: false
+    
+    - name: Warn if disk usage is high
+      debug:
+        msg: "WARNING: Disk usage is {{ disk_usage.stdout }}%"
+      when: disk_usage.stdout|int > disk_warning_threshold
+    
+    - name: Check memory usage
+      shell: free | grep Mem | awk '{printf("%.0f", ($3/$2) * 100)}'
+      register: memory_usage
+      changed_when: false
+    
+    - name: Warn if memory usage is high
+      debug:
+        msg: "WARNING: Memory usage is {{ memory_usage.stdout }}%"
+      when: memory_usage.stdout|int > memory_warning_threshold
+    
+    - name: Check load average
+      shell: uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//'
+      register: load_average
+      changed_when: false
+    
+    - name: Display load average
+      debug:
+        msg: "Load average (1min): {{ load_average.stdout }}"
+    
+    - name: Check for zombie processes
+      shell: ps aux | awk '$8=="Z" {print $0}' | wc -l
+      register: zombie_count
+      changed_when: false
+    
+    - name: Warn if zombies exist
+      debug:
+        msg: "WARNING: {{ zombie_count.stdout }} zombie processes found"
+      when: zombie_count.stdout|int > 0
+    
+    - name: Summary
+      debug:
+        msg: |
+          === Health Check Summary ===
+          Hostname: {{ ansible_hostname }}
+          Disk Usage: {{ disk_usage.stdout }}%
+          Memory Usage: {{ memory_usage.stdout }}%
+          Load Average: {{ load_average.stdout }}
+          Zombie Processes: {{ zombie_count.stdout }}
+          Status: {% if disk_usage.stdout|int > disk_warning_threshold or memory_usage.stdout|int > memory_warning_threshold %}NEEDS ATTENTION{% else %}HEALTHY{% endif %}

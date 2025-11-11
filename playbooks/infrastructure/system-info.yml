@@ -1,0 +1,35 @@
+---
+- name: Gather system information
+  hosts: all
+  gather_facts: yes
+  
+  tasks:
+    - name: Display system information
+      debug:
+        msg: |
+          Hostname: {{ ansible_hostname }}
+          FQDN: {{ ansible_fqdn }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          IP Address: {{ ansible_default_ipv4.address }}
+          Memory: {{ ansible_memtotal_mb }}MB
+          CPUs: {{ ansible_processor_vcpus }}
+          Uptime: {{ ansible_uptime_seconds // 3600 }} hours
+          Kernel: {{ ansible_kernel }}
+    
+    - name: Check disk usage
+      shell: df -h / | tail -1
+      register: disk_usage
+      changed_when: false
+    
+    - name: Display disk usage
+      debug:
+        msg: "Root filesystem: {{ disk_usage.stdout }}"
+    
+    - name: Get running services count
+      shell: systemctl list-units --type=service --state=running | wc -l
+      register: service_count
+      changed_when: false
+    
+    - name: Display service count
+      debug:
+        msg: "Running services: {{ service_count.stdout }}"
