@@ -1,0 +1,221 @@
+---
+- name: Gather System Performance Metrics
+  hosts: all
+  gather_facts: yes
+  become: no
+  
+  vars:
+    # Configurable thresholds
+    cpu_warning_threshold: 70
+    cpu_critical_threshold: 90
+    memory_warning_threshold: 80
+    memory_critical_threshold: 95
+    disk_warning_threshold: 80
+    disk_critical_threshold: 90
+    
+    # Output formatting
+    metrics_timestamp: "{{ ansible_date_time.iso8601 }}"
+    report_format: "json"  # Options: json, yaml, text
+
+  tasks:
+    - name: Collect CPU usage statistics
+      shell: |
+        top -bn2 -d 0.5 | grep "Cpu(s)" | tail -1 | awk '{print $2}' | cut -d'%' -f1
+      register: cpu_usage
+      changed_when: false
+      failed_when: false
+
+    - name: Collect memory statistics
+      shell: |
+        free | grep Mem | awk '{printf "%.2f", ($3/$2) * 100.0}'
+      register: memory_usage
+      changed_when: false
+      failed_when: false
+
+    - name: Get detailed memory information
+      shell: |
+        echo "total:$(free -h | grep Mem | awk '{print $2}')"
+        echo "used:$(free -h | grep Mem | awk '{print $3}')"
+        echo "free:$(free -h | grep Mem | awk '{print $4}')"
+        echo "available:$(free -h | grep Mem | awk '{print $7}')"
+      register: memory_details
+      changed_when: false
+      failed_when: false
+
+    - name: Collect disk usage statistics
+      shell: |
+        df -h / | tail -1 | awk '{print $5}' | cut -d'%' -f1
+      register: root_disk_usage
+      changed_when: false
+      failed_when: false
+
+    - name: Get all filesystem usage
+      shell: |
+        df -h | grep -v tmpfs | grep -v devtmpfs | tail -n +2
+      register: all_filesystems
+      changed_when: false
+      failed_when: false
+
+    - name: Get disk I/O statistics
+      shell: |
+        iostat -x 1 2 | tail -n +4 | grep -v "^$" | tail -n +7
+      register: disk_io
+      changed_when: false
+      failed_when: false
+      ignore_errors: yes
+
+    - name: Collect network statistics
+      shell: |
+        cat /proc/net/dev | grep -v "lo:" | tail -n +3 | awk '{print $1, $2, $10}'
+      register: network_stats
+      changed_when: false
+      failed_when: false
+
+    - name: Get network interface details
+      shell: |
+        ip -s link show | grep -E "^[0-9]|RX:|TX:" | paste - - -
+      register: network_interfaces
+      changed_when: false
+      failed_when: false
+
+    - name: Get system load averages
+      shell: |
+        uptime | awk -F'load average:' '{print $2}' | sed 's/^[ \t]*//'
+      register: load_average
+      changed_when: false
+      failed_when: false
+
+    - name: Get running processes count
+      shell: |
+        ps aux | wc -l
+      register: process_count
+      changed_when: false
+      failed_when: false
+
+    - name: Get top CPU consuming processes
+      shell: |
+        ps aux --sort=-%cpu | head -6 | tail -5
+      register: top_cpu_processes
+      changed_when: false
+      failed_when: false
+
+    - name: Get top memory consuming processes
+      shell: |
+        ps aux --sort=-%mem | head -6 | tail -5
+      register: top_mem_processes
+      changed_when: false
+      failed_when: false
+
+    - name: Get system uptime
+      shell: |
+        uptime -p
+      register: system_uptime
+      changed_when: false
+      failed_when: false
+
+    - name: Check swap usage
+      shell: |
+        free | grep Swap | awk '{if ($2 > 0) printf "%.2f", ($3/$2) * 100.0; else print "0"}'
+      register: swap_usage
+      changed_when: false
+      failed_when: false
+
+    - name: Determine CPU health status
+      set_fact:
+        cpu_status: >-
+          {% if cpu_usage.stdout | float >= cpu_critical_threshold %}CRITICAL
+          {% elif cpu_usage.stdout | float >= cpu_warning_threshold %}WARNING
+          {% else %}OK{% endif %}
+
+    - name: Determine memory health status
+      set_fact:
+        memory_status: >-
+          {% if memory_usage.stdout | float >= memory_critical_threshold %}CRITICAL
+          {% elif memory_usage.stdout | float >= memory_warning_threshold %}WARNING
+          {% else %}OK{% endif %}
+
+    - name: Determine disk health status
+      set_fact:
+        disk_status: >-
+          {% if root_disk_usage.stdout | float >= disk_critical_threshold %}CRITICAL
+          {% elif root_disk_usage.stdout | float >= disk_warning_threshold %}WARNING
+          {% else %}OK{% endif %}
+
+    - name: Generate comprehensive performance report
+      set_fact:
+        performance_metrics:
+          hostname: "{{ ansible_hostname }}"
+          fqdn: "{{ ansible_fqdn }}"
+          timestamp: "{{ metrics_timestamp }}"
+          system_info:
+            os: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+            kernel: "{{ ansible_kernel }}"
+            architecture: "{{ ansible_architecture }}"
+            uptime: "{{ system_uptime.stdout }}"
+            processes: "{{ process_count.stdout | int - 1 }}"
+          cpu:
+            usage_percent: "{{ cpu_usage.stdout | float | round(2) }}"
+            status: "{{ cpu_status }}"
+            load_average: "{{ load_average.stdout }}"
+            cores: "{{ ansible_processor_vcpus }}"
+            model: "{{ ansible_processor[2] | default('Unknown') }}"
+            top_processes: "{{ top_cpu_processes.stdout_lines }}"
+          memory:
+            usage_percent: "{{ memory_usage.stdout | float | round(2) }}"
+            status: "{{ memory_status }}"
+            total: "{{ ansible_memtotal_mb }}MB"
+            used_mb: "{{ ansible_memtotal_mb - ansible_memfree_mb }}"
+            free_mb: "{{ ansible_memfree_mb }}"
+            details: "{{ memory_details.stdout_lines }}"
+            top_processes: "{{ top_mem_processes.stdout_lines }}"
+          swap:
+            usage_percent: "{{ swap_usage.stdout | float | round(2) }}"
+            total_mb: "{{ ansible_swaptotal_mb }}"
+            used_mb: "{{ ansible_swaptotal_mb - ansible_swapfree_mb }}"
+          disk:
+            root_usage_percent: "{{ root_disk_usage.stdout | float | round(2) }}"
+            status: "{{ disk_status }}"
+            all_filesystems: "{{ all_filesystems.stdout_lines }}"
+            io_stats: "{{ disk_io.stdout_lines | default([]) }}"
+          network:
+            interfaces: "{{ ansible_interfaces }}"
+            statistics: "{{ network_stats.stdout_lines }}"
+            details: "{{ network_interfaces.stdout_lines }}"
+          health_summary:
+            overall_status: >-
+              {% if cpu_status == 'CRITICAL' or memory_status == 'CRITICAL' or disk_status == 'CRITICAL' %}CRITICAL
+              {% elif cpu_status == 'WARNING' or memory_status == 'WARNING' or disk_status == 'WARNING' %}WARNING
+              {% else %}OK{% endif %}
+            alerts:
+              - "{% if cpu_status != 'OK' %}CPU usage at {{ cpu_usage.stdout }}% ({{ cpu_status }}){% endif %}"
+              - "{% if memory_status != 'OK' %}Memory usage at {{ memory_usage.stdout }}% ({{ memory_status }}){% endif %}"
+              - "{% if disk_status != 'OK' %}Disk usage at {{ root_disk_usage.stdout }}% ({{ disk_status }}){% endif %}"
+
+    - name: Display performance metrics summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Performance Metrics for {{ ansible_hostname }}"
+          - "Timestamp: {{ metrics_timestamp }}"
+          - "=========================================="
+          - "Overall Status: {{ performance_metrics.health_summary.overall_status }}"
+          - ""
+          - "CPU Usage: {{ cpu_usage.stdout }}% [{{ cpu_status }}]"
+          - "Memory Usage: {{ memory_usage.stdout }}% [{{ memory_status }}]"
+          - "Root Disk Usage: {{ root_disk_usage.stdout }}% [{{ disk_status }}]"
+          - "Load Average: {{ load_average.stdout }}"
+          - "System Uptime: {{ system_uptime.stdout }}"
+          - "=========================================="
+
+    - name: Save metrics to JSON file (optional)
+      copy:
+        content: "{{ performance_metrics | to_nice_json }}"
+        dest: "/tmp/performance-metrics-{{ ansible_hostname }}-{{ ansible_date_time.epoch }}.json"
+      when: report_format == "json"
+      delegate_to: localhost
+      become: no
+
+    - name: Display full metrics in JSON format
+      debug:
+        var: performance_metrics
+      when: report_format == "json"
