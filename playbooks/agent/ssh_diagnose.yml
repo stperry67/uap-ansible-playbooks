@@ -1,0 +1,163 @@
+---
+# diagnose_ssh.yml
+# SSH troubleshooting and diagnostics
+
+- name: SSH Diagnostic Report
+  hosts: "{{ target_hosts | default('all') }}"
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    report_dir: "/var/log/uap-agent/diagnostics"
+    timestamp: "{{ ansible_date_time.iso8601_basic_short }}"
+    report_file: "{{ report_dir }}/ssh_diagnostic_{{ timestamp }}.txt"
+  
+  tasks:
+    - name: Ensure diagnostics directory exists
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: '0755'
+    
+    - name: Initialize report file
+      copy:
+        dest: "{{ report_file }}"
+        content: |
+          ================================
+          SSH Diagnostic Report
+          ================================
+          Generated: {{ ansible_date_time.iso8601 }}
+          Host: {{ ansible_hostname }}
+          FQDN: {{ ansible_fqdn }}
+          IP: {{ ansible_default_ipv4.address }}
+          ================================
+          
+        mode: '0644'
+    
+    - name: Get recent SSH failures
+      shell: |
+        journalctl -u sshd -u ssh --since "1 hour ago" --no-pager | \
+        grep -iE "failed|failure|invalid|refused" | tail -50
+      register: ssh_failures
+      ignore_errors: yes
+    
+    - name: Append SSH failures to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} SSH FAILURES"
+        block: |
+          === Recent SSH Failures (Last Hour) ===
+          {{ ssh_failures.stdout if ssh_failures.stdout else 'No failures detected' }}
+          
+    
+    - name: Get failed login attempts by IP
+      shell: |
+        journalctl -u sshd -u ssh --since "24 hours ago" --no-pager | \
+        grep "Failed password" | \
+        awk '{print $(NF-3)}' | \
+        sort | uniq -c | sort -rn | head -20
+      register: failed_ips
+      ignore_errors: yes
+    
+    - name: Append failed IPs to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} FAILED IPS"
+        block: |
+          === Top Failed Login IPs (Last 24h) ===
+          {{ failed_ips.stdout if failed_ips.stdout else 'No data' }}
+          
+    
+    - name: Get current SSH connections
+      shell: |
+        ss -tn state established '( dport = :22 or sport = :22 )' 2>/dev/null || \
+        netstat -tn | grep :22 | grep ESTABLISHED
+      register: ssh_connections
+      ignore_errors: yes
+    
+    - name: Append active connections to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} ACTIVE CONNECTIONS"
+        block: |
+          === Current SSH Connections ===
+          {{ ssh_connections.stdout if ssh_connections.stdout else 'No active connections' }}
+          
+    
+    - name: Get SSH configuration
+      shell: |
+        grep -vE '^#|^$' /etc/ssh/sshd_config | \
+        grep -E 'PermitRoot|PasswordAuth|MaxAuthTries|LoginGraceTime|MaxStartups'
+      register: ssh_config
+      ignore_errors: yes
+    
+    - name: Append SSH config to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} SSH CONFIG"
+        block: |
+          === SSH Configuration (Security Settings) ===
+          {{ ssh_config.stdout if ssh_config.stdout else 'Could not read config' }}
+          
+    
+    - name: Check for blocked IPs (fail2ban)
+      shell: |
+        if command -v fail2ban-client &> /dev/null; then
+          fail2ban-client status sshd 2>/dev/null || echo "SSH jail not configured"
+        else
+          echo "fail2ban not installed"
+        fi
+      register: fail2ban_status
+      ignore_errors: yes
+    
+    - name: Append fail2ban status to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} FAIL2BAN"
+        block: |
+          === Fail2ban Status ===
+          {{ fail2ban_status.stdout }}
+          
+    
+    - name: Get system resource usage
+      shell: |
+        echo "Load Average: $(uptime | awk -F'load average:' '{print $2}')"
+        echo "Memory: $(free -h | grep Mem | awk '{print "Used: "$3" / Total: "$2}')"
+        echo "CPU: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}')%"
+      register: system_resources
+      ignore_errors: yes
+    
+    - name: Append system resources to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} RESOURCES"
+        block: |
+          === System Resources ===
+          {{ system_resources.stdout }}
+          
+    
+    - name: Finalize report
+      lineinfile:
+        path: "{{ report_file }}"
+        line: |
+          
+          ================================
+          Report Complete: {{ ansible_date_time.iso8601 }}
+          ================================
+    
+    - name: Display report location
+      debug:
+        msg: 
+          - "SSH diagnostic report generated"
+          - "Location: {{ report_file }}"
+          - "View with: cat {{ report_file }}"
+    
+    - name: Read report contents
+      slurp:
+        src: "{{ report_file }}"
+      register: report_contents
+    
+    - name: Return report
+      set_fact:
+        diagnostic_report: "{{ report_contents.content | b64decode }}"
+        report_path: "{{ report_file }}"

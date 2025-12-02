@@ -1,0 +1,279 @@
+---
+# diagnose_disk.yml
+# Disk space diagnostics and analysis
+
+- name: Disk Space Diagnostic Report
+  hosts: "{{ target_hosts | default('all') }}"
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    report_dir: "/var/log/uap-agent/diagnostics"
+    timestamp: "{{ ansible_date_time.iso8601_basic_short }}"
+    report_file: "{{ report_dir }}/disk_diagnostic_{{ timestamp }}.txt"
+  
+  tasks:
+    - name: Ensure diagnostics directory exists
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: '0755'
+    
+    - name: Initialize report file
+      copy:
+        dest: "{{ report_file }}"
+        content: |
+          ================================
+          Disk Space Diagnostic Report
+          ================================
+          Generated: {{ ansible_date_time.iso8601 }}
+          Host: {{ ansible_hostname }}
+          ================================
+          
+        mode: '0644'
+    
+    - name: Get disk usage summary
+      shell: "df -h"
+      register: disk_usage
+    
+    - name: Append disk usage to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} DISK USAGE"
+        block: |
+          === Disk Usage Summary ===
+          {{ disk_usage.stdout }}
+          
+    
+    - name: Get inode usage
+      shell: "df -i"
+      register: inode_usage
+    
+    - name: Append inode usage to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} INODE USAGE"
+        block: |
+          === Inode Usage ===
+          {{ inode_usage.stdout }}
+          
+    
+    - name: Find largest directories in root
+      shell: |
+        du -hx / 2>/dev/null | sort -rh | head -20
+      register: largest_dirs
+      async: 300
+      poll: 5
+      ignore_errors: yes
+    
+    - name: Append largest directories to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} LARGEST DIRS"
+        block: |
+          === Largest Directories (Top 20) ===
+          {{ largest_dirs.stdout if largest_dirs.stdout else 'Could not complete scan' }}
+          
+    
+    - name: Find largest files in /var
+      shell: |
+        find /var -type f -size +100M -exec du -h {} + 2>/dev/null | sort -rh | head -20
+      register: largest_var_files
+      async: 180
+      poll: 5
+      ignore_errors: yes
+    
+    - name: Append largest /var files to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} LARGEST VAR FILES"
+        block: |
+          === Largest Files in /var (>100MB) ===
+          {{ largest_var_files.stdout if largest_var_files.stdout else 'No large files or scan incomplete' }}
+          
+    
+    - name: Check /tmp directory usage
+      shell: |
+        echo "Total /tmp usage:"
+        du -sh /tmp 2>/dev/null || echo "Cannot access /tmp"
+        echo ""
+        echo "Largest items in /tmp:"
+        du -sh /tmp/* 2>/dev/null | sort -rh | head -10 || echo "Empty or cannot access"
+      register: tmp_usage
+      ignore_errors: yes
+    
+    - name: Append /tmp usage to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} TMP USAGE"
+        block: |
+          === /tmp Directory Usage ===
+          {{ tmp_usage.stdout }}
+          
+    
+    - name: Check /var/tmp directory usage
+      shell: |
+        echo "Total /var/tmp usage:"
+        du -sh /var/tmp 2>/dev/null || echo "Cannot access /var/tmp"
+        echo ""
+        echo "Largest items in /var/tmp:"
+        du -sh /var/tmp/* 2>/dev/null | sort -rh | head -10 || echo "Empty or cannot access"
+      register: var_tmp_usage
+      ignore_errors: yes
+    
+    - name: Append /var/tmp usage to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} VAR TMP USAGE"
+        block: |
+          === /var/tmp Directory Usage ===
+          {{ var_tmp_usage.stdout }}
+          
+    
+    - name: Check log file sizes
+      shell: |
+        du -sh /var/log/* 2>/dev/null | sort -rh | head -20
+      register: log_sizes
+      ignore_errors: yes
+    
+    - name: Append log sizes to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} LOG SIZES"
+        block: |
+          === Log File Sizes (Top 20) ===
+          {{ log_sizes.stdout }}
+          
+    
+    - name: Check journal disk usage
+      shell: "journalctl --disk-usage"
+      register: journal_usage
+      ignore_errors: yes
+    
+    - name: Append journal usage to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} JOURNAL USAGE"
+        block: |
+          === Systemd Journal Disk Usage ===
+          {{ journal_usage.stdout }}
+          
+    
+    - name: Count old temp files
+      shell: |
+        echo "Files in /tmp older than 7 days:"
+        find /tmp -type f -mtime +7 2>/dev/null | wc -l
+        echo ""
+        echo "Files in /var/tmp older than 7 days:"
+        find /var/tmp -type f -mtime +7 2>/dev/null | wc -l
+      register: old_temp_files
+      ignore_errors: yes
+    
+    - name: Append old temp files to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} OLD TEMP FILES"
+        block: |
+          === Old Temporary Files ===
+          {{ old_temp_files.stdout }}
+          
+    
+    - name: Count old compressed logs
+      shell: |
+        echo "Compressed log files older than 30 days:"
+        find /var/log -name "*.gz" -o -name "*.bz2" -mtime +30 2>/dev/null | wc -l
+        echo ""
+        echo "Total size of old compressed logs:"
+        find /var/log -name "*.gz" -o -name "*.bz2" -mtime +30 -exec du -ch {} + 2>/dev/null | tail -1
+      register: old_logs
+      ignore_errors: yes
+    
+    - name: Append old logs to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} OLD LOGS"
+        block: |
+          === Old Compressed Logs (>30 days) ===
+          {{ old_logs.stdout }}
+          
+    
+    - name: Get package cache usage
+      shell: |
+        if [ -d /var/cache/apt/archives ]; then
+          echo "APT cache:"
+          du -sh /var/cache/apt/archives
+        fi
+        if [ -d /var/cache/yum ]; then
+          echo "YUM cache:"
+          du -sh /var/cache/yum
+        fi
+        if [ -d /var/cache/dnf ]; then
+          echo "DNF cache:"
+          du -sh /var/cache/dnf
+        fi
+      register: package_cache
+      ignore_errors: yes
+    
+    - name: Append package cache to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} PACKAGE CACHE"
+        block: |
+          === Package Manager Cache ===
+          {{ package_cache.stdout if package_cache.stdout else 'No cache found' }}
+          
+    
+    - name: Identify cleanup opportunities
+      shell: |
+        echo "=== Cleanup Opportunities ==="
+        echo ""
+        
+        # Calculate potential space savings
+        TEMP_FILES=$(find /tmp /var/tmp -type f -mtime +7 2>/dev/null -exec du -ch {} + | tail -1 | awk '{print $1}')
+        OLD_LOGS=$(find /var/log -name "*.gz" -o -name "*.bz2" -mtime +30 2>/dev/null -exec du -ch {} + | tail -1 | awk '{print $1}')
+        
+        echo "Potential space savings:"
+        echo "- Old temp files (>7 days): ${TEMP_FILES:-0}"
+        echo "- Old compressed logs (>30 days): ${OLD_LOGS:-0}"
+        echo ""
+        echo "Safe cleanup commands:"
+        echo "- find /tmp -type f -mtime +7 -delete"
+        echo "- find /var/tmp -type f -mtime +7 -delete"
+        echo "- find /var/log -name '*.gz' -mtime +30 -delete"
+        echo "- journalctl --vacuum-time=7d"
+      register: cleanup_opportunities
+      ignore_errors: yes
+    
+    - name: Append cleanup opportunities to report
+      blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} CLEANUP"
+        block: |
+          {{ cleanup_opportunities.stdout }}
+          
+    
+    - name: Finalize report
+      lineinfile:
+        path: "{{ report_file }}"
+        line: |
+          
+          ================================
+          Report Complete: {{ ansible_date_time.iso8601 }}
+          ================================
+    
+    - name: Display report location
+      debug:
+        msg:
+          - "Disk diagnostic report generated"
+          - "Location: {{ report_file }}"
+          - "View with: cat {{ report_file }}"
+    
+    - name: Read report contents
+      slurp:
+        src: "{{ report_file }}"
+      register: report_contents
+    
+    - name: Return report
+      set_fact:
+        diagnostic_report: "{{ report_contents.content | b64decode }}"
+        report_path: "{{ report_file }}"
