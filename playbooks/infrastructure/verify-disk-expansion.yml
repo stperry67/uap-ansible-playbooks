@@ -1,0 +1,97 @@
+---
+- name: Verify disk expansion was successful
+  hosts: all
+  gather_facts: yes
+  
+  vars:
+    filesystem: "{{ filesystem | default('/var') }}"
+    minimum_available_gb: "{{ minimum_available_gb | default(10) }}"
+  
+  tasks:
+    - name: Check new disk usage
+      shell: df -h {{ filesystem }}
+      register: new_disk_usage
+      changed_when: false
+    
+    - name: Display results
+      debug:
+        msg:
+          - "Expansion verification for {{ filesystem }}"
+          - "{{ new_disk_usage.stdout_lines }}"
+    
+    - name: Get detailed filesystem information
+      shell: |
+        df {{ filesystem }} | tail -1 | awk '{print $2, $3, $4, $5}'
+      register: fs_details
+      changed_when: false
+    
+    - name: Parse filesystem details
+      set_fact:
+        total_size: "{{ fs_details.stdout.split()[0] }}"
+        used_space: "{{ fs_details.stdout.split()[1] }}"
+        available_space: "{{ fs_details.stdout.split()[2] }}"
+        usage_percent: "{{ fs_details.stdout.split()[3] }}"
+    
+    - name: Convert available space to GB
+      shell: |
+        avail=$(df -BG {{ filesystem }} | tail -1 | awk '{print $4}' | sed 's/G//')
+        echo $avail
+      register: available_gb
+      changed_when: false
+    
+    - name: Check if sufficient space is available
+      assert:
+        that:
+          - available_gb.stdout | int >= minimum_available_gb | int
+        fail_msg: "WARNING: Only {{ available_gb.stdout }}GB available, expected at least {{ minimum_available_gb }}GB"
+        success_msg: "SUCCESS: {{ available_gb.stdout }}GB available (>= {{ minimum_available_gb }}GB required)"
+    
+    - name: Verify usage is below critical threshold
+      assert:
+        that:
+          - usage_percent | replace('%', '') | int < 90
+        fail_msg: "WARNING: Filesystem still at {{ usage_percent }} usage after expansion"
+        success_msg: "SUCCESS: Filesystem usage is {{ usage_percent }}"
+    
+    - name: Check partition alignment
+      shell: parted $(df {{ filesystem }} | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//') align-check optimal $(df {{ filesystem }} | tail -1 | awk '{print $1}' | grep -o '[0-9]*$')
+      register: alignment_check
+      become: yes
+      changed_when: false
+      failed_when: false
+    
+    - name: Create verification report
+      set_fact:
+        verification_report:
+          filesystem: "{{ filesystem }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          total_size: "{{ total_size }}"
+          used_space: "{{ used_space }}"
+          available_space: "{{ available_space }}"
+          available_gb: "{{ available_gb.stdout }}"
+          usage_percent: "{{ usage_percent }}"
+          meets_minimum: "{{ (available_gb.stdout | int) >= (minimum_available_gb | int) }}"
+          below_critical: "{{ (usage_percent | replace('%', '') | int) < 90 }}"
+          verification_passed: true
+    
+    - name: Display verification summary
+      debug:
+        msg:
+          - "=== Disk Expansion Verification Summary ==="
+          - "Filesystem: {{ filesystem }}"
+          - "Total Size: {{ total_size }}"
+          - "Used: {{ used_space }} ({{ usage_percent }})"
+          - "Available: {{ available_space }} ({{ available_gb.stdout }}GB)"
+          - "Minimum Required: {{ minimum_available_gb }}GB"
+          - "Status: {% if verification_report.meets_minimum and verification_report.below_critical %}PASSED{% else %}WARNING{% endif %}"
+    
+    # - name: Save verification report
+    #   copy:
+    #     content: "{{ verification_report | to_nice_json }}"
+    #     dest: "/tmp/verification_report_{{ ansible_date_time.epoch }}.json"
+    #   become: yes
+    
+    # - name: Log success to syslog
+    #   shell: logger -t 
+    #   uap-disk-expansion "SUCCESS: Disk expansion verified for {{ filesystem }} - {{ available_gb.stdout }}GB available"
+    #   changed_when: false

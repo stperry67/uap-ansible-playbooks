@@ -1,0 +1,87 @@
+---
+- name: Pre-expansion system check
+  hosts: all
+  gather_facts: yes
+  
+  vars:
+    filesystem: "{{ filesystem | default('/var') }}"
+  
+  tasks:
+    - name: Check current disk usage
+      shell: df -h {{ filesystem }}
+      register: disk_usage
+      changed_when: false
+      failed_when: false
+    
+    - name: Display current state
+      debug:
+        msg: "Current disk usage: {{ disk_usage.stdout_lines }}"
+    
+    - name: Get filesystem details
+      shell: |
+        df {{ filesystem }} | tail -1 | awk '{print $1, $2, $3, $4, $5}'
+      register: fs_details
+      changed_when: false
+    
+    - name: Parse filesystem information
+      set_fact:
+        fs_device: "{{ fs_details.stdout.split()[0] }}"
+        fs_size: "{{ fs_details.stdout.split()[1] }}"
+        fs_used: "{{ fs_details.stdout.split()[2] }}"
+        fs_available: "{{ fs_details.stdout.split()[3] }}"
+        fs_percent: "{{ fs_details.stdout.split()[4] }}"
+    
+    - name: Verify VM tools running
+      shell: systemctl is-active vmtoolsd
+      register: vmtools_status
+      changed_when: false
+      failed_when: vmtools_status.rc != 0
+    
+    - name: Check if growpart is available
+      command: which growpart
+      register: growpart_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Install cloud-utils-growpart if missing
+      package:
+        name: cloud-utils-growpart
+        state: present
+      become: yes
+      when: growpart_check.rc != 0
+    
+    - name: Determine filesystem type
+      shell: df -T {{ filesystem }} | tail -1 | awk '{print $2}'
+      register: fs_type
+      changed_when: false
+    
+    - name: Display system readiness
+      debug:
+        msg:
+          - "Filesystem: {{ filesystem }}"
+          - "Device: {{ fs_device }}"
+          - "Type: {{ fs_type.stdout }}"
+          - "Size: {{ fs_size }}"
+          - "Used: {{ fs_used }} ({{ fs_percent }})"
+          - "Available: {{ fs_available }}"
+          - "VMware Tools: Active"
+          - "growpart: Available"
+    
+    - name: Create readiness report
+      set_fact:
+        pre_expansion_report:
+          filesystem: "{{ filesystem }}"
+          device: "{{ fs_device }}"
+          fs_type: "{{ fs_type.stdout }}"
+          current_size: "{{ fs_size }}"
+          used_space: "{{ fs_used }}"
+          available_space: "{{ fs_available }}"
+          usage_percent: "{{ fs_percent }}"
+          vmtools_active: true
+          growpart_available: true
+    
+    - name: Save report to file
+      copy:
+        content: "{{ pre_expansion_report | to_nice_json }}"
+        dest: "/tmp/pre_expansion_report_{{ ansible_date_time.epoch }}.json"
+      become: yes

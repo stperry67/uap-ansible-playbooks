@@ -1,6 +1,6 @@
 # Ansible Playbooks for UAP
 
-This repository contains Ansible playbooks used by the Universal Automation Platform (UAP).
+This repository contains Ansible playbooks used by the Unified Automation Platform (UAP).
 
 ## Directory Structure
 

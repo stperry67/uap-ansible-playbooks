@@ -1,0 +1,114 @@
+---
+- name: Extend partition and filesystem after disk expansion
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    filesystem: "{{ filesystem | default('/var') }}"
+  
+  tasks:
+    - name: Rescan SCSI bus to detect disk changes
+      shell: |
+        for host in /sys/class/scsi_host/host*/scan; do
+          echo "- - -" > $host
+        done
+        for device in /sys/class/scsi_device/*/device/rescan; do
+          echo 1 > $device
+        done
+      changed_when: true
+    
+    - name: Wait for disk changes to be detected
+      pause:
+        seconds: 5
+    
+    - name: Get disk device for filesystem
+      shell: df {{ filesystem }} | tail -1 | awk '{print $1}'
+      register: disk_device
+      changed_when: false
+    
+    - name: Display device information
+      debug:
+        msg: "Filesystem {{ filesystem }} is on device {{ disk_device.stdout }}"
+    
+    - name: Get base disk device (without partition number)
+      shell: echo {{ disk_device.stdout }} | sed 's/[0-9]*$//'
+      register: base_device
+      changed_when: false
+    
+    - name: Get partition number
+      shell: echo {{ disk_device.stdout }} | grep -o '[0-9]*$'
+      register: part_num
+      changed_when: false
+    
+    - name: Check current partition table
+      shell: parted {{ base_device.stdout }} print 2>&1
+      register: partition_table_before
+      changed_when: false
+      failed_when: false
+    
+    - name: Fix GPT partition table if needed
+      shell: echo "Fix" | parted ---pretend-input-tty {{ base_device.stdout }} print
+      register: parted_fix
+      changed_when: "'Warning' in parted_fix.stderr or 'fix' in parted_fix.stdout.lower()"
+      failed_when: false
+    
+    - name: Extend partition using growpart
+      shell: growpart {{ base_device.stdout }} {{ part_num.stdout }}
+      register: growpart_result
+      changed_when: "'CHANGED' in growpart_result.stdout"
+      failed_when:
+        - growpart_result.rc != 0
+        - "'NOCHANGE' not in growpart_result.stdout"
+    
+    - name: Display growpart result
+      debug:
+        msg: "{{ growpart_result.stdout }}"
+    
+    - name: Determine filesystem type
+      shell: df -T {{ filesystem }} | tail -1 | awk '{print $2}'
+      register: fs_type
+      changed_when: false
+    
+    - name: Extend XFS filesystem
+      shell: xfs_growfs {{ filesystem }}
+      register: xfs_result
+      when: fs_type.stdout == 'xfs'
+      changed_when: true
+    
+    - name: Extend EXT4 filesystem
+      shell: resize2fs {{ disk_device.stdout }}
+      register: ext4_result
+      when: fs_type.stdout in ['ext4', 'ext3', 'ext2']
+      changed_when: true
+    
+    - name: Display filesystem extension result
+      debug:
+        msg: "{{ xfs_result.stdout if fs_type.stdout == 'xfs' else ext4_result.stdout }}"
+      when: xfs_result is defined or ext4_result is defined
+    
+    - name: Get new disk usage
+      shell: df -h {{ filesystem }}
+      register: new_disk_usage
+      changed_when: false
+    
+    - name: Display new disk usage
+      debug:
+        msg: "New disk usage: {{ new_disk_usage.stdout_lines }}"
+    
+    - name: Create expansion report
+      set_fact:
+        expansion_report:
+          filesystem: "{{ filesystem }}"
+          device: "{{ disk_device.stdout }}"
+          base_device: "{{ base_device.stdout }}"
+          partition_number: "{{ part_num.stdout }}"
+          fs_type: "{{ fs_type.stdout }}"
+          partition_extended: "{{ 'CHANGED' in growpart_result.stdout }}"
+          filesystem_extended: true
+          new_usage: "{{ new_disk_usage.stdout }}"
+    
+    - name: Save expansion report
+      copy:
+        content: "{{ expansion_report | to_nice_json }}"
+        dest: "/tmp/expansion_report_{{ ansible_date_time.epoch }}.json"
