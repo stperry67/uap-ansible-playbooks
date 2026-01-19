@@ -26,9 +26,9 @@
       changed_when: false
       failed_when: disk_device.rc != 0
     
-    - name: Display device information
-      debug:
-        msg: "Filesystem {{ filesystem }} is on device {{ disk_device.stdout }}"
+    # - name: Display device information
+    #   debug:
+    #     msg: "Filesystem {{ filesystem }} is on device {{ disk_device.stdout }}"
     
     - name: Check if device is LVM
       shell: |
@@ -182,6 +182,6 @@
       register: final_size
       changed_when: false
     
-    - name: Display final filesystem size
-      debug:
-        msg: "{{ final_size.stdout_lines }}"
+    # - name: Display final filesystem size
+    #   debug:
+    #     msg: "{{ final_size.stdout_lines }}"
