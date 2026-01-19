@@ -67,21 +67,21 @@
           - "VMware Tools: Active"
           - "growpart: Available"
     
-    - name: Create readiness report
-      set_fact:
-        pre_expansion_report:
-          filesystem: "{{ filesystem }}"
-          device: "{{ fs_device }}"
-          fs_type: "{{ fs_type.stdout }}"
-          current_size: "{{ fs_size }}"
-          used_space: "{{ fs_used }}"
-          available_space: "{{ fs_available }}"
-          usage_percent: "{{ fs_percent }}"
-          vmtools_active: true
-          growpart_available: true
+    # - name: Create readiness report
+    #   set_fact:
+    #     pre_expansion_report:
+    #       filesystem: "{{ filesystem }}"
+    #       device: "{{ fs_device }}"
+    #       fs_type: "{{ fs_type.stdout }}"
+    #       current_size: "{{ fs_size }}"
+    #       used_space: "{{ fs_used }}"
+    #       available_space: "{{ fs_available }}"
+    #       usage_percent: "{{ fs_percent }}"
+    #       vmtools_active: true
+    #       growpart_available: true
     
-    - name: Save report to file
-      copy:
-        content: "{{ pre_expansion_report | to_nice_json }}"
-        dest: "/tmp/pre_expansion_report_{{ ansible_date_time.epoch }}.json"
-      become: yes
+    # - name: Save report to file
+    #   copy:
+    #     content: "{{ pre_expansion_report | to_nice_json }}"
+    #     dest: "/tmp/pre_expansion_report_{{ ansible_date_time.epoch }}.json"
+    #   become: yes

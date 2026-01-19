@@ -2,10 +2,8 @@
 - name: Extend partition and filesystem after disk expansion
   hosts: all
   become: yes
-  gather_facts: yes
-  
   vars:
-    filesystem: "{{ filesystem | default('/var') }}"
+    filesystem: "{{ filesystem }}"  # Passed from workflow via extra_vars
   
   tasks:
     - name: Rescan SCSI bus to detect disk changes
@@ -26,89 +24,167 @@
       shell: df {{ filesystem }} | tail -1 | awk '{print $1}'
       register: disk_device
       changed_when: false
+      failed_when: disk_device.rc != 0
     
     - name: Display device information
       debug:
         msg: "Filesystem {{ filesystem }} is on device {{ disk_device.stdout }}"
     
-    - name: Get base disk device (without partition number)
-      shell: echo {{ disk_device.stdout }} | sed 's/[0-9]*$//'
-      register: base_device
+    - name: Check if device is LVM
+      shell: |
+        if [[ "{{ disk_device.stdout }}" =~ ^/dev/mapper/ ]] || [[ "{{ disk_device.stdout }}" =~ ^/dev/dm- ]]; then
+          echo "lvm"
+        else
+          echo "direct"
+        fi
+      register: device_type
       changed_when: false
     
-    - name: Get partition number
-      shell: echo {{ disk_device.stdout }} | grep -o '[0-9]*$'
-      register: part_num
-      changed_when: false
+    # LVM Path (most common for /var on Ubuntu)
+    - name: LVM expansion steps
+      block:
+        - name: Get physical volume for logical volume
+          shell: |
+            lvdisplay {{ disk_device.stdout }} 2>/dev/null | grep 'LV Path' | awk '{print $3}'
+          register: lv_path
+          changed_when: false
+        
+        - name: Get volume group name
+          shell: |
+            lvdisplay {{ disk_device.stdout }} 2>/dev/null | grep 'VG Name' | awk '{print $3}'
+          register: vg_name
+          changed_when: false
+        
+        - name: Get physical volume
+          shell: |
+            vgdisplay {{ vg_name.stdout }} 2>/dev/null | grep 'PV Name' | awk '{print $3}'
+          register: pv_name
+          changed_when: false
+        
+        - name: Display LVM structure
+          debug:
+            msg: 
+              - "Logical Volume: {{ lv_path.stdout }}"
+              - "Volume Group: {{ vg_name.stdout }}"
+              - "Physical Volume: {{ pv_name.stdout }}"
+        
+        - name: Get partition from physical volume
+          shell: echo {{ pv_name.stdout }} | grep -o '[0-9]*$'
+          register: partition_num
+          changed_when: false
+        
+        - name: Get disk from physical volume
+          shell: echo {{ pv_name.stdout }} | sed 's/[0-9]*$//'
+          register: base_disk
+          changed_when: false
+        
+        - name: Display disk and partition info
+          debug:
+            msg:
+              - "Base disk: {{ base_disk.stdout }}"
+              - "Partition number: {{ partition_num.stdout }}"
+        
+        - name: Fix GPT partition table if needed
+          shell: echo "Fix" | parted ---pretend-input-tty {{ base_disk.stdout }} print
+          register: gpt_fix
+          changed_when: "'Warning' in gpt_fix.stdout or 'Error' in gpt_fix.stdout"
+          failed_when: false
+        
+        - name: Extend partition with growpart
+          shell: growpart {{ base_disk.stdout }} {{ partition_num.stdout }}
+          register: growpart_result
+          changed_when: "'CHANGED' in growpart_result.stdout"
+          failed_when: 
+            - growpart_result.rc != 0
+            - "'NOCHANGE' not in growpart_result.stdout"
+        
+        - name: Resize physical volume
+          shell: pvresize {{ pv_name.stdout }}
+          when: growpart_result.changed
+          register: pvresize_result
+        
+        - name: Display PV resize result
+          debug:
+            msg: "{{ pvresize_result.stdout_lines }}"
+          when: growpart_result.changed
+        
+        - name: Check volume group free space
+          shell: vgdisplay {{ vg_name.stdout }} | grep 'Free  PE' | awk '{print $5, $6}'
+          register: vg_free
+          changed_when: false
+        
+        - name: Display VG free space
+          debug:
+            msg: "Volume group free space: {{ vg_free.stdout }}"
+        
+        - name: Extend logical volume to use all free space
+          shell: lvextend -l +100%FREE {{ lv_path.stdout }}
+          register: lvextend_result
+          changed_when: "'successfully resized' in lvextend_result.stdout"
+          failed_when:
+            - lvextend_result.rc != 0
+            - "'matches existing size' not in lvextend_result.stdout"
+            - "'New size' not in lvextend_result.stdout"
+        
+        - name: Display LV extend result
+          debug:
+            msg: "{{ lvextend_result.stdout_lines }}"
+          when: lvextend_result.changed
+      
+      when: device_type.stdout == "lvm"
     
-    - name: Check current partition table
-      shell: parted {{ base_device.stdout }} print 2>&1
-      register: partition_table_before
-      changed_when: false
-      failed_when: false
+    # Direct partition path (less common, but included for completeness)
+    - name: Direct partition expansion
+      block:
+        - name: Get partition number from device
+          shell: echo {{ disk_device.stdout }} | grep -o '[0-9]*$'
+          register: part_num
+          changed_when: false
+        
+        - name: Get base disk from device
+          shell: echo {{ disk_device.stdout }} | sed 's/[0-9]*$//'
+          register: base_disk
+          changed_when: false
+        
+        - name: Extend partition with growpart
+          shell: growpart {{ base_disk.stdout }} {{ part_num.stdout }}
+          register: growpart_result
+          changed_when: "'CHANGED' in growpart_result.stdout"
+          failed_when: 
+            - growpart_result.rc != 0
+            - "'NOCHANGE' not in growpart_result.stdout"
+      
+      when: device_type.stdout == "direct"
     
-    - name: Fix GPT partition table if needed
-      shell: echo "Fix" | parted ---pretend-input-tty {{ base_device.stdout }} print
-      register: parted_fix
-      changed_when: "'Warning' in parted_fix.stderr or 'fix' in parted_fix.stdout.lower()"
-      failed_when: false
-    
-    - name: Extend partition using growpart
-      shell: growpart {{ base_device.stdout }} {{ part_num.stdout }}
-      register: growpart_result
-      changed_when: "'CHANGED' in growpart_result.stdout"
-      failed_when:
-        - growpart_result.rc != 0
-        - "'NOCHANGE' not in growpart_result.stdout"
-    
-    - name: Display growpart result
-      debug:
-        msg: "{{ growpart_result.stdout }}"
-    
-    - name: Determine filesystem type
+    # Filesystem extension (common for both LVM and direct)
+    - name: Detect filesystem type
       shell: df -T {{ filesystem }} | tail -1 | awk '{print $2}'
       register: fs_type
       changed_when: false
     
+    - name: Display filesystem type
+      debug:
+        msg: "Filesystem type: {{ fs_type.stdout }}"
+    
     - name: Extend XFS filesystem
       shell: xfs_growfs {{ filesystem }}
+      when: 
+        - fs_type.stdout == 'xfs'
+        - growpart_result.changed or lvextend_result.changed
       register: xfs_result
-      when: fs_type.stdout == 'xfs'
-      changed_when: true
     
-    - name: Extend EXT4 filesystem
+    - name: Extend EXT4 filesystem  
       shell: resize2fs {{ disk_device.stdout }}
-      register: ext4_result
-      when: fs_type.stdout in ['ext4', 'ext3', 'ext2']
-      changed_when: true
+      when: 
+        - fs_type.stdout in ['ext4', 'ext3', 'ext2']
+        - growpart_result.changed or lvextend_result.changed
+      register: ext_result
     
-    - name: Display filesystem extension result
-      debug:
-        msg: "{{ xfs_result.stdout if fs_type.stdout == 'xfs' else ext4_result.stdout }}"
-      when: xfs_result is defined or ext4_result is defined
-    
-    - name: Get new disk usage
+    - name: Verify filesystem expansion
       shell: df -h {{ filesystem }}
-      register: new_disk_usage
+      register: final_size
       changed_when: false
     
-    - name: Display new disk usage
+    - name: Display final filesystem size
       debug:
-        msg: "New disk usage: {{ new_disk_usage.stdout_lines }}"
-    
-    - name: Create expansion report
-      set_fact:
-        expansion_report:
-          filesystem: "{{ filesystem }}"
-          device: "{{ disk_device.stdout }}"
-          base_device: "{{ base_device.stdout }}"
-          partition_number: "{{ part_num.stdout }}"
-          fs_type: "{{ fs_type.stdout }}"
-          partition_extended: "{{ 'CHANGED' in growpart_result.stdout }}"
-          filesystem_extended: true
-          new_usage: "{{ new_disk_usage.stdout }}"
-    
-    - name: Save expansion report
-      copy:
-        content: "{{ expansion_report | to_nice_json }}"
-        dest: "/tmp/expansion_report_{{ ansible_date_time.epoch }}.json"
+        msg: "{{ final_size.stdout_lines }}"
