@@ -45,7 +45,6 @@
       register: device_type
       changed_when: false
     
-    # LVM Path (most common for /var on Ubuntu)
     - name: LVM expansion steps
       block:
         - name: Get physical volume for logical volume
@@ -62,9 +61,14 @@
         
         - name: Get physical volume
           shell: |
-            vgdisplay {{ vg_name.stdout }} 2>/dev/null | grep 'PV Name' | awk '{print $3}'
+            pvs --noheadings -o pv_name -S vg_name={{ vg_name.stdout }} | tr -d ' ' | head -1
           register: pv_name
           changed_when: false
+        
+        - name: Validate physical volume was found
+          fail:
+            msg: "Could not find physical volume for volume group {{ vg_name.stdout }}"
+          when: pv_name.stdout == ""
         
         - name: Display LVM structure
           debug:
@@ -83,14 +87,13 @@
           register: base_disk
           changed_when: false
         
-        # - name: Display disk and partition info
-        #   debug:
-        #     msg:
-        #       - "Base disk: {{ base_disk.stdout }}"
-        #       - "Partition number: {{ partition_num.stdout }}"
+        - name: Validate partition information
+          fail:
+            msg: "Could not extract partition number from {{ pv_name.stdout }}"
+          when: partition_num.stdout == "" or base_disk.stdout == ""
         
         - name: Fix GPT partition table if needed
-          shell: echo "Fix" | parted ---pretend-input-tty {{ base_disk.stdout }} print
+          shell: echo "Fix" | parted --pretend-input-tty {{ base_disk.stdout }} print
           register: gpt_fix
           changed_when: "'Warning' in gpt_fix.stdout or 'Error' in gpt_fix.stdout"
           failed_when: false
@@ -108,19 +111,10 @@
           when: growpart_result.changed
           register: pvresize_result
         
-        # - name: Display PV resize result
-        #   debug:
-        #     msg: "{{ pvresize_result.stdout_lines }}"
-        #   when: growpart_result.changed
-        
         - name: Check volume group free space
           shell: vgdisplay {{ vg_name.stdout }} | grep 'Free  PE' | awk '{print $5, $6}'
           register: vg_free
           changed_when: false
-        
-        # - name: Display VG free space
-        #   debug:
-        #     msg: "Volume group free space: {{ vg_free.stdout }}"
         
         - name: Extend logical volume to use all free space
           shell: lvextend -l +100%FREE {{ lv_path.stdout }}
@@ -138,7 +132,6 @@
       
       when: device_type.stdout == "lvm"
     
-    # Direct partition path (less common, but included for completeness)
     - name: Direct partition expansion
       block:
         - name: Get partition number from device
@@ -161,7 +154,6 @@
       
       when: device_type.stdout == "direct"
     
-    # Filesystem extension (common for both LVM and direct)
     - name: Detect filesystem type
       shell: df -T {{ filesystem }} | tail -1 | awk '{print $2}'
       register: fs_type
