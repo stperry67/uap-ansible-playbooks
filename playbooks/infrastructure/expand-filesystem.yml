@@ -3,7 +3,7 @@
   hosts: all
   become: yes
   vars:
-    filesystem: "{{ filesystem }}"  # Passed from workflow via extra_vars
+    filesystem: "{{ filesystem }}"
   
   tasks:
     - name: Rescan SCSI bus to detect disk changes
@@ -32,11 +32,16 @@
     
     - name: Check if device is LVM
       shell: |
-        if [[ "{{ disk_device.stdout }}" =~ ^/dev/mapper/ ]] || [[ "{{ disk_device.stdout }}" =~ ^/dev/dm- ]]; then
-          echo "lvm"
-        else
-          echo "direct"
-        fi
+        case "{{ disk_device.stdout }}" in
+          /dev/mapper/*|/dev/dm-*)
+            echo "lvm"
+            ;;
+          *)
+            echo "direct"
+            ;;
+        esac
+      args:
+        executable: /bin/bash
       register: device_type
       changed_when: false
     
@@ -78,11 +83,11 @@
           register: base_disk
           changed_when: false
         
-        - name: Display disk and partition info
-          debug:
-            msg:
-              - "Base disk: {{ base_disk.stdout }}"
-              - "Partition number: {{ partition_num.stdout }}"
+        # - name: Display disk and partition info
+        #   debug:
+        #     msg:
+        #       - "Base disk: {{ base_disk.stdout }}"
+        #       - "Partition number: {{ partition_num.stdout }}"
         
         - name: Fix GPT partition table if needed
           shell: echo "Fix" | parted ---pretend-input-tty {{ base_disk.stdout }} print
@@ -103,19 +108,19 @@
           when: growpart_result.changed
           register: pvresize_result
         
-        - name: Display PV resize result
-          debug:
-            msg: "{{ pvresize_result.stdout_lines }}"
-          when: growpart_result.changed
+        # - name: Display PV resize result
+        #   debug:
+        #     msg: "{{ pvresize_result.stdout_lines }}"
+        #   when: growpart_result.changed
         
         - name: Check volume group free space
           shell: vgdisplay {{ vg_name.stdout }} | grep 'Free  PE' | awk '{print $5, $6}'
           register: vg_free
           changed_when: false
         
-        - name: Display VG free space
-          debug:
-            msg: "Volume group free space: {{ vg_free.stdout }}"
+        # - name: Display VG free space
+        #   debug:
+        #     msg: "Volume group free space: {{ vg_free.stdout }}"
         
         - name: Extend logical volume to use all free space
           shell: lvextend -l +100%FREE {{ lv_path.stdout }}
