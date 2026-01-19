@@ -6,67 +6,6 @@
     filesystem: "{{ filesystem }}"
   
   tasks:
-    - name: Detect OS family and distribution
-      set_fact:
-        os_family: "{{ ansible_os_family }}"
-        os_distribution: "{{ ansible_distribution }}"
-        os_major_version: "{{ ansible_distribution_major_version }}"
-    
-    - name: Display detected OS information
-      debug:
-        msg: "Detected OS: {{ os_distribution }} {{ ansible_distribution_version }} (Family: {{ os_family }})"
-    
-    - name: Install required packages for Debian/Ubuntu
-      apt:
-        name:
-          - cloud-guest-utils
-          - parted
-          - lvm2
-          - xfsprogs
-          - e2fsprogs
-        state: present
-        update_cache: yes
-      when: os_family == "Debian"
-      register: debian_packages
-      failed_when: false
-    
-    - name: Install required packages for RHEL/CentOS/Rocky/AlmaLinux
-      yum:
-        name:
-          - cloud-utils-growpart
-          - parted
-          - lvm2
-          - xfsprogs
-          - e2fsprogs
-        state: present
-      when: os_family == "RedHat"
-      register: redhat_packages
-      failed_when: false
-    
-    - name: Install required packages for SLES/openSUSE
-      zypper:
-        name:
-          - growpart
-          - parted
-          - lvm2
-          - xfsprogs
-          - e2fsprogs
-        state: present
-      when: os_family == "Suse"
-      register: suse_packages
-      failed_when: false
-    
-    - name: Verify critical tools are available
-      command: which {{ item }}
-      register: tool_check
-      failed_when: false
-      changed_when: false
-      loop:
-        - growpart
-        - parted
-        - pvs
-        - lvextend
-    
     - name: Rescan SCSI bus to detect disk changes
       shell: |
         for host in /sys/class/scsi_host/host*/scan; do
@@ -87,9 +26,9 @@
       changed_when: false
       failed_when: disk_device.rc != 0
     
-    - name: Display device information
-      debug:
-        msg: "Filesystem {{ filesystem }} is on device {{ disk_device.stdout }}"
+    # - name: Display device information
+    #   debug:
+    #     msg: "Filesystem {{ filesystem }} is on device {{ disk_device.stdout }}"
     
     - name: Check if device is LVM
       shell: |
@@ -158,14 +97,6 @@
           register: gpt_fix
           changed_when: "'Warning' in gpt_fix.stdout or 'Error' in gpt_fix.stdout"
           failed_when: false
-          when: os_family in ["Debian", "RedHat"]
-        
-        - name: Fix GPT partition table (SLES/openSUSE - no pretend-input-tty)
-          shell: parted -s {{ base_disk.stdout }} print fix
-          register: gpt_fix_sles
-          changed_when: false
-          failed_when: false
-          when: os_family == "Suse"
         
         - name: Extend partition with growpart
           shell: growpart {{ base_disk.stdout }} {{ partition_num.stdout }}
@@ -239,25 +170,18 @@
         - growpart_result.changed or lvextend_result.changed
       register: xfs_result
     
-    - name: Extend EXT4 filesystem
+    - name: Extend EXT4 filesystem  
       shell: resize2fs {{ disk_device.stdout }}
       when: 
         - fs_type.stdout in ['ext4', 'ext3', 'ext2']
         - growpart_result.changed or lvextend_result.changed
       register: ext_result
     
-    - name: Extend Btrfs filesystem
-      shell: btrfs filesystem resize max {{ filesystem }}
-      when:
-        - fs_type.stdout == 'btrfs'
-        - growpart_result.changed or lvextend_result.changed
-      register: btrfs_result
-    
     - name: Verify filesystem expansion
       shell: df -h {{ filesystem }}
       register: final_size
       changed_when: false
     
-    - name: Display final filesystem size
-      debug:
-        msg: "{{ final_size.stdout_lines }}"
+    # - name: Display final filesystem size
+    #   debug:
+    #     msg: "{{ final_size.stdout_lines }}"
