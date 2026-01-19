@@ -3,11 +3,12 @@
   hosts: all
   gather_facts: yes
   
-  vars:
-    filesystem: "{{ filesystem | default('/var') }}"
-    minimum_available_gb: "{{ minimum_available_gb | default(10) }}"
-  
   tasks:
+    - name: Set default values for missing variables
+      set_fact:
+        filesystem: "{{ filesystem | default('/var') }}"
+        minimum_available_gb: "{{ minimum_available_gb | default(10) }}"
+    
     - name: Check new disk usage
       shell: df -h {{ filesystem }}
       register: new_disk_usage
@@ -84,14 +85,3 @@
           - "Available: {{ available_space }} ({{ available_gb.stdout }}GB)"
           - "Minimum Required: {{ minimum_available_gb }}GB"
           - "Status: {% if verification_report.meets_minimum and verification_report.below_critical %}PASSED{% else %}WARNING{% endif %}"
-    
-    # - name: Save verification report
-    #   copy:
-    #     content: "{{ verification_report | to_nice_json }}"
-    #     dest: "/tmp/verification_report_{{ ansible_date_time.epoch }}.json"
-    #   become: yes
-    
-    # - name: Log success to syslog
-    #   shell: logger -t 
-    #   uap-disk-expansion "SUCCESS: Disk expansion verified for {{ filesystem }} - {{ available_gb.stdout }}GB available"
-    #   changed_when: false
